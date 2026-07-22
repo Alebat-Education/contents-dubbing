@@ -1,0 +1,64 @@
+{
+  "Comment": "Translate normalized Spanish transcript segments with Amazon Translate and render English subtitles.",
+  "StartAt": "TranslateSegments",
+  "States": {
+    "TranslateSegments": {
+      "Type": "Map",
+      "ItemsPath": "$.segments",
+      "MaxConcurrency": ${translate_max_concurrency},
+      "ItemSelector": {
+        "segment.$": "$$.Map.Item.Value"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "TranslateText",
+        "States": {
+          "TranslateText": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:translate:translateText",
+            "Parameters": {
+              "SourceLanguageCode": "${translate_source_language_code}",
+              "TargetLanguageCode": "en",
+              "TerminologyNames": [
+                "${terminology_name}"
+              ],
+              "Text.$": "$.segment.text"
+            },
+            "ResultPath": "$.translate_result",
+            "Next": "BuildTranslatedSegment"
+          },
+          "BuildTranslatedSegment": {
+            "Type": "Pass",
+            "Parameters": {
+              "id.$": "$.segment.id",
+              "translated_text.$": "$.translate_result.TranslatedText"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.translated_refs",
+      "Next": "RenderVtt"
+    },
+    "RenderVtt": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${render_vtt_lambda_arn}",
+        "Payload": {
+          "job_name.$": "$.job_name",
+          "bucket": "${data_bucket_name}",
+          "translation_engine": "amazon_translate",
+          "original_video_uri.$": "$.original_video_uri",
+          "segments_s3_uri.$": "$.segments_s3_uri",
+          "translated_refs.$": "$.translated_refs",
+          "output_prefix.$": "States.Format('translations/amazon_translate/{}', $.job_name)"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "End": true
+    }
+  }
+}

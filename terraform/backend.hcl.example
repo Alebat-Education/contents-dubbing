@@ -1,0 +1,6 @@
+# Copy this file to backend.hcl before initializing Terraform.
+# backend.hcl is intentionally ignored because each environment uses its own bucket.
+#bucket = "REPLACE_WITH_EXISTING_STATE_BUCKET"
+#region = "REPLACE_WITH_STATE_BUCKET_REGION"
+bucket = "video-dubbing-poc-dev-84906b8f"
+region = "eu-west-1"

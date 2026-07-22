@@ -1,0 +1,185 @@
+{
+  "Comment": "Generate generative Polly speech per translated segment and write a timed audio manifest.",
+  "StartAt": "PreparePollyTasks",
+  "States": {
+    "PreparePollyTasks": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${prepare_polly_tasks_lambda_arn}",
+        "Payload": {
+          "translation_result.$": "$",
+          "bucket": "${data_bucket_name}",
+          "audio_output_prefix.$": "States.Format('audio_output/polly/{}', $.job_name)",
+          "engine": "${polly_engine}",
+          "voice_map": ${polly_voice_map_json}
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Next": "SynthesizeSegments"
+    },
+    "SynthesizeSegments": {
+      "Type": "Map",
+      "ItemsPath": "$.task_refs",
+      "MaxConcurrency": ${polly_max_concurrency},
+      "ItemSelector": {
+        "job_name.$": "$.job_name",
+        "original_video_uri.$": "$.original_video_uri",
+        "translation_engine.$": "$.translation_engine",
+        "task_ref.$": "$$.Map.Item.Value"
+      },
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        },
+        "StartAt": "ReadPollyTask",
+        "States": {
+          "ReadPollyTask": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+            "Parameters": {
+              "Bucket.$": "$.task_ref.task_s3_bucket",
+              "Key.$": "$.task_ref.task_s3_key"
+            },
+            "ResultPath": "$.task_object",
+            "Next": "ParsePollyTask"
+          },
+          "ParsePollyTask": {
+            "Type": "Pass",
+            "Parameters": {
+              "job_name.$": "$.job_name",
+              "original_video_uri.$": "$.original_video_uri",
+              "translation_engine.$": "$.translation_engine",
+              "task.$": "States.StringToJson($.task_object.Body)"
+            },
+            "Next": "StartSpeechSynthesisTask"
+          },
+          "StartSpeechSynthesisTask": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${polly_proxy_lambda_arn}",
+              "Payload": {
+                "operation": "start",
+                "bucket": "${polly_output_bucket_name}",
+                "task.$": "$.task"
+              }
+            },
+            "ResultSelector": {
+              "SynthesisTask.$": "$.Payload.SynthesisTask"
+            },
+            "ResultPath": "$.synthesis",
+            "Next": "WaitBeforePolling"
+          },
+          "WaitBeforePolling": {
+            "Type": "Wait",
+            "Seconds": 15,
+            "Next": "GetSpeechSynthesisTask"
+          },
+          "GetSpeechSynthesisTask": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${polly_proxy_lambda_arn}",
+              "Payload": {
+                "operation": "get",
+                "task_id.$": "$.synthesis.SynthesisTask.TaskId"
+              }
+            },
+            "ResultSelector": {
+              "SynthesisTask.$": "$.Payload.SynthesisTask"
+            },
+            "ResultPath": "$.synthesis_status",
+            "Next": "SynthesisComplete?"
+          },
+          "SynthesisComplete?": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.synthesis_status.SynthesisTask.TaskStatus",
+                "StringEquals": "completed",
+                "Next": "BuildSynthesisResult"
+              },
+              {
+                "Variable": "$.synthesis_status.SynthesisTask.TaskStatus",
+                "StringEquals": "failed",
+                "Next": "SynthesisFailed"
+              }
+            ],
+            "Default": "WaitBeforePolling"
+          },
+          "BuildSynthesisResult": {
+            "Type": "Pass",
+            "Parameters": {
+              "job_name.$": "$.job_name",
+              "original_video_uri.$": "$.original_video_uri",
+              "translation_engine.$": "$.translation_engine",
+              "segment_id.$": "$.task.segment_id",
+              "speaker.$": "$.task.speaker",
+              "voice_id.$": "$.task.voice_id",
+              "engine.$": "$.task.engine",
+              "start_time.$": "$.task.start_time",
+              "end_time.$": "$.task.end_time",
+              "offset_ms.$": "$.task.offset_ms",
+              "audio_s3_uri.$": "$.synthesis_status.SynthesisTask.OutputUri"
+            },
+            "ResultPath": "$.synthesis_result",
+            "Next": "WriteSynthesisResult"
+          },
+          "WriteSynthesisResult": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+            "Parameters": {
+              "Bucket": "${data_bucket_name}",
+              "Key.$": "States.Format('manifests/polly/{}/synthesis_results/{}.json', $.job_name, $.task.segment_id)",
+              "Body.$": "States.JsonToString($.synthesis_result)",
+              "ContentType": "application/json"
+            },
+            "ResultPath": null,
+            "Next": "BuildSynthesisRef"
+          },
+          "BuildSynthesisRef": {
+            "Type": "Pass",
+            "Parameters": {
+              "segment_id.$": "$.task.segment_id",
+              "result_s3_bucket": "${data_bucket_name}",
+              "result_s3_key.$": "States.Format('manifests/polly/{}/synthesis_results/{}.json', $.job_name, $.task.segment_id)"
+            },
+            "End": true
+          },
+          "SynthesisFailed": {
+            "Type": "Fail",
+            "Error": "PollySynthesisFailed",
+            "Cause": "Amazon Polly returned failed for a speech synthesis task."
+          }
+        }
+      },
+      "ResultWriter": {
+        "Resource": "arn:aws:states:::s3:putObject",
+        "Parameters": {
+          "Bucket": "${data_bucket_name}",
+          "Prefix.$": "States.Format('manifests/polly/{}/map_results', $.job_name)"
+        }
+      },
+      "ResultPath": null,
+      "Next": "WritePollyManifest"
+    },
+    "WritePollyManifest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${write_polly_manifest_lambda_arn}",
+        "Payload": {
+          "bucket": "${data_bucket_name}",
+          "job_name.$": "$.job_name",
+          "original_video_uri.$": "$.original_video_uri",
+          "translation_engine.$": "$.translation_engine",
+          "task_refs.$": "$.task_refs"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "End": true
+    }
+  }
+}

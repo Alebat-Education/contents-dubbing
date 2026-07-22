@@ -1,0 +1,35 @@
+project_name = "video-dubbing-poc"
+environment  = "dev"
+aws_region   = "eu-west-1"
+
+# Optional. Leave null to let Terraform create a unique bucket name.
+# data_bucket_name = "alebat-video-dubbing-poc-dev"
+# polly_output_bucket_name = "alebat-video-dubbing-poc-dev-polly-eucentral1"
+
+# For fast PoC cleanup only. Keep false for shared accounts.
+force_destroy_bucket = false
+
+transcribe_language_code = "es-US"
+transcribe_media_format  = "mp4"
+max_speaker_labels       = 4
+
+# Confirm model availability and access in your Bedrock console.
+bedrock_model_id = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+polly_region = "eu-central-1"
+polly_engine = "generative"
+
+polly_voice_map = {
+  spk_0 = "Ruth"
+  spk_1 = "Stephen"
+  spk_2 = "Joanna"
+  spk_3 = "Salli"
+}
+
+assemble_audio_memory_size          = 8192
+assemble_audio_timeout_seconds      = 900
+assemble_audio_ephemeral_storage_mb = 4096
+
+tags = {
+  Owner = "Terraform"
+}

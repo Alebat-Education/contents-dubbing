@@ -1,0 +1,101 @@
+{
+  "Comment": "Package the original video stream with the timed Polly English audio into a playable MP4.",
+  "StartAt": "AssembleDubbedAudio",
+  "States": {
+    "AssembleDubbedAudio": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${assemble_dubbed_audio_lambda_arn}",
+        "Payload": {
+          "bucket": "${data_bucket_name}",
+          "workflow_input.$": "$",
+          "manifest_s3_uri.$": "$.manifest_s3_uri",
+          "assembled_audio_prefix": "audio_output/assembled"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Next": "BuildMediaConvertJob"
+    },
+    "BuildMediaConvertJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${build_mediaconvert_job_lambda_arn}",
+        "Payload": {
+          "bucket": "${data_bucket_name}",
+          "manifest.$": "$",
+          "mediaconvert_role_arn": "${mediaconvert_role_arn}",
+          "mediaconvert_queue_arn": "${mediaconvert_queue_arn}",
+          "output_prefix_uri": "s3://${data_bucket_name}/video_output/mediaconvert"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "Next": "CreateMediaConvertJob"
+    },
+    "CreateMediaConvertJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:mediaconvert:createJob",
+      "Parameters": {
+        "Role.$": "$.job_payload.Role",
+        "Queue.$": "$.job_payload.Queue",
+        "UserMetadata.$": "$.job_payload.UserMetadata",
+        "Settings.$": "$.job_payload.Settings",
+        "StatusUpdateInterval.$": "$.job_payload.StatusUpdateInterval"
+      },
+      "ResultPath": "$.create_job_result",
+      "Next": "WaitBeforePolling"
+    },
+    "WaitBeforePolling": {
+      "Type": "Wait",
+      "Seconds": 60,
+      "Next": "GetMediaConvertJob"
+    },
+    "GetMediaConvertJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:mediaconvert:getJob",
+      "Parameters": {
+        "Id.$": "$.create_job_result.Job.Id"
+      },
+      "ResultPath": "$.job_status",
+      "Next": "MediaConvertComplete?"
+    },
+    "MediaConvertComplete?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.job_status.Job.Status",
+          "StringEquals": "COMPLETE",
+          "Next": "PackagingComplete"
+        },
+        {
+          "Variable": "$.job_status.Job.Status",
+          "StringEquals": "ERROR",
+          "Next": "PackagingFailed"
+        },
+        {
+          "Variable": "$.job_status.Job.Status",
+          "StringEquals": "CANCELED",
+          "Next": "PackagingFailed"
+        }
+      ],
+      "Default": "WaitBeforePolling"
+    },
+    "PackagingComplete": {
+      "Type": "Pass",
+      "Parameters": {
+        "job_name.$": "$.job_name",
+        "original_video_uri.$": "$.original_video_uri",
+        "mediaconvert_job_id.$": "$.create_job_result.Job.Id",
+        "mediaconvert_status.$": "$.job_status.Job.Status",
+        "output_prefix_uri.$": "$.expected_output_prefix_uri"
+      },
+      "End": true
+    },
+    "PackagingFailed": {
+      "Type": "Fail",
+      "Error": "MediaConvertJobFailed",
+      "Cause": "MediaConvert returned ERROR or CANCELED."
+    }
+  }
+}
