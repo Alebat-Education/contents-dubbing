@@ -63,7 +63,9 @@ Build the FFmpeg layer, then deploy:
 ./scripts/build_ffmpeg_layer.sh
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
-terraform init
+cp backend.hcl.example backend.hcl
+# Edit backend.hcl and set the existing S3 state bucket name.
+terraform init -backend-config=backend.hcl
 terraform plan
 terraform apply
 ```
@@ -77,6 +79,44 @@ terraform output data_bucket_name
 terraform output polly_output_bucket_name
 terraform output state_machine_arns
 ```
+
+### Terraform state
+
+Terraform stores this environment's state in the primary S3 bucket at
+`terraform/terraform.tfstate`. The backend uses S3-native lockfiles
+(`terraform/terraform.tfstate.tflock`) with `use_lockfile = true`, it does not
+use DynamoDB. The bucket is versioned and the backend encrypts both the state
+and lockfile objects.
+
+
+The state bucket must already exist before Terraform can initialize this root
+module. Backend configuration is evaluated before Terraform can create the
+resources in `main.tf`.
+
+For an existing environment, create the ignored `terraform/backend.hcl` from
+`backend.hcl.example`, replace the placeholder bucket name, and initialize:
+
+```bash
+cd terraform
+terraform init -backend-config=backend.hcl
+terraform plan
+```
+
+For a normal cleanup, leave `force_destroy_bucket = false` and run
+`terraform destroy`. The state object intentionally keeps the primary backend
+bucket non-empty, so Terraform removes the other resources it can destroy and
+then reports an expected `BucketNotEmpty` error when it attempts that bucket.
+The bucket and remote state remain available; no state migration is required.
+
+For the final project teardown, when the backend bucket must also be deleted:
+
+1. Run `terraform init -migrate-state` and confirm migration from S3 to the
+   local backend.
+2. Set `force_destroy_bucket = true` in `terraform.tfvars`, then run
+   `terraform destroy`.
+3. Restore `terraform/versions.tf` from Git if the repository will continue to
+   be used, and securely retain or dispose of the local state backup as needed.
+
 
 ## Running The PoC
 
@@ -207,24 +247,3 @@ For large jobs, keep `"fit_to_segment_duration": true` and tune `"ffprobe_concur
 - Same-speaker gap compression and offset compaction are intentionally not part of the active experiment. Review the `8.5s / 24 words` segmentation diagnostics and the dubbed MP4 first, then evaluate gap compression separately if preserved pauses still dominate the listening issue.
 - Intermediate transcription, translation, and Polly handoffs are S3-pointer based to avoid Step Functions payload limits. Inline transcription `segments` are intentionally slim; Polly synthesis tasks, synthesis results, Map result exports, and full manifests are stored as S3 objects; new consumers should prefer the S3 pointer fields returned by each workflow when full metadata is needed. The Polly synthesis Map is distributed and does not carry aggregate child output forward in state, avoiding both the 25,000-event history limit and the 256 KiB state output limit.
 - S3 buckets do not configure lifecycle expiration or age-based deletion in this PoC. Objects are retained until explicitly deleted or the bucket is destroyed during teardown.
-
-## Validation
-
-Local checks:
-
-```bash
-terraform -chdir=terraform fmt -check -recursive
-terraform -chdir=terraform validate
-python3 -m unittest discover -s tests
-```
-
-Optional ASL validation after deployment credentials are configured:
-
-```bash
-aws stepfunctions validate-state-machine-definition \
-  --definition file://rendered-definition.json
-```
-
-## Technical Base
-
-The infrastructure is Terraform AWS provider based. Runtime code uses Python 3.12 Lambdas with Boto3 from the managed Lambda runtime, plus one Python 3.12 Lambda that uses an FFmpeg Lambda layer for audio timeline assembly. The architecture intentionally avoids long-running compute for orchestration: Step Functions owns polling, the Polly proxy only forwards cross-Region Polly API calls, and Lambdas otherwise transform JSON, subtitle text, SSML tasks, continuous audio, and MediaConvert job settings.

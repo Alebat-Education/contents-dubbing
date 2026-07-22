@@ -104,7 +104,7 @@ resource "aws_s3_object" "ffmpeg_layer" {
   bucket       = module.s3.bucket_name
   key          = local.ffmpeg_layer_s3_key
   source       = local.ffmpeg_layer_zip_path
-  etag         = filemd5(local.ffmpeg_layer_zip_path)
+  source_hash  = filemd5(local.ffmpeg_layer_zip_path)
   content_type = "application/zip"
 }
 
