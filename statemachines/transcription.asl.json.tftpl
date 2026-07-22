@@ -1,0 +1,80 @@
+{
+  "Comment": "Start a Spanish Amazon Transcribe job with medical custom vocabulary and speaker diarization, then normalize the transcript.",
+  "StartAt": "StartTranscriptionJob",
+  "States": {
+    "StartTranscriptionJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:transcribe:startTranscriptionJob",
+      "Parameters": {
+        "TranscriptionJobName.$": "States.Format('${name_prefix}-{}', $.job_name)",
+        "LanguageCode": "${language_code}",
+        "MediaFormat": "${media_format}",
+        "Media": {
+          "MediaFileUri.$": "$.media_uri"
+        },
+        "OutputBucketName": "${data_bucket_name}",
+        "OutputKey.$": "States.Format('transcripts/raw/{}/raw.json', $.job_name)",
+        "Settings": {
+          "VocabularyName": "${vocabulary_name}",
+          "ShowSpeakerLabels": true,
+          "MaxSpeakerLabels": ${max_speaker_labels}
+        }
+      },
+      "ResultPath": "$.start_transcription",
+      "Next": "WaitBeforePolling"
+    },
+    "WaitBeforePolling": {
+      "Type": "Wait",
+      "Seconds": 30,
+      "Next": "GetTranscriptionJob"
+    },
+    "GetTranscriptionJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:transcribe:getTranscriptionJob",
+      "Parameters": {
+        "TranscriptionJobName.$": "States.Format('${name_prefix}-{}', $.job_name)"
+      },
+      "ResultPath": "$.transcription_status",
+      "Next": "TranscriptionComplete?"
+    },
+    "TranscriptionComplete?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.transcription_status.TranscriptionJob.TranscriptionJobStatus",
+          "StringEquals": "COMPLETED",
+          "Next": "ParseTranscribeOutput"
+        },
+        {
+          "Variable": "$.transcription_status.TranscriptionJob.TranscriptionJobStatus",
+          "StringEquals": "FAILED",
+          "Next": "TranscriptionFailed"
+        }
+      ],
+      "Default": "WaitBeforePolling"
+    },
+    "ParseTranscribeOutput": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${parse_transcribe_output_lambda_arn}",
+        "Payload": {
+          "job_name.$": "$.job_name",
+          "bucket": "${data_bucket_name}",
+          "raw_transcript_key.$": "States.Format('transcripts/raw/{}/raw.json', $.job_name)",
+          "segments_key.$": "States.Format('transcripts/segments/{}/segments.json', $.job_name)",
+          "segments_jsonl_key.$": "States.Format('transcripts/segments/{}/segments.jsonl', $.job_name)",
+          "original_video_uri.$": "$.media_uri",
+          "source_language_code": "${language_code}"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "End": true
+    },
+    "TranscriptionFailed": {
+      "Type": "Fail",
+      "Error": "TranscribeJobFailed",
+      "Cause": "Amazon Transcribe returned FAILED for the transcription job."
+    }
+  }
+}

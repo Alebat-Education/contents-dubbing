@@ -1,0 +1,117 @@
+{
+  "Comment": "Translate normalized Spanish transcript segments with Bedrock for comparison against Amazon Translate.",
+  "StartAt": "BuildBedrockPrompts",
+  "States": {
+    "BuildBedrockPrompts": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${build_bedrock_prompts_lambda_arn}",
+        "Payload.$": "$"
+      },
+      "OutputPath": "$.Payload",
+      "Next": "InvokeBedrockForSegments"
+    },
+    "InvokeBedrockForSegments": {
+      "Type": "Map",
+      "ItemsPath": "$.batch_refs",
+      "MaxConcurrency": ${bedrock_max_concurrency},
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "ReadBatch",
+        "States": {
+          "ReadBatch": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+            "Parameters": {
+              "Bucket.$": "$.batch_s3_bucket",
+              "Key.$": "$.batch_s3_key"
+            },
+            "ResultPath": "$.batch_object",
+            "Next": "ParseBatch"
+          },
+          "ParseBatch": {
+            "Type": "Pass",
+            "Parameters": {
+              "batch_id.$": "$.batch_id",
+              "segment_ids.$": "$.segment_ids",
+              "result_s3_bucket.$": "$.result_s3_bucket",
+              "result_s3_key.$": "$.result_s3_key",
+              "batch.$": "States.StringToJson($.batch_object.Body)"
+            },
+            "Next": "InvokeModel"
+          },
+          "InvokeModel": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:bedrockruntime:invokeModel",
+            "Parameters": {
+              "ModelId": "${bedrock_model_id}",
+              "ContentType": "application/json",
+              "Accept": "application/json",
+              "Body.$": "States.JsonToString($.batch.body)"
+            },
+            "ResultPath": "$.bedrock_response",
+            "Next": "BuildResultEnvelope"
+          },
+          "BuildResultEnvelope": {
+            "Type": "Pass",
+            "Parameters": {
+              "batch_id.$": "$.batch_id",
+              "segment_ids.$": "$.segment_ids",
+              "response": {
+                "Body.$": "$.bedrock_response.Body"
+              }
+            },
+            "ResultPath": "$.result_envelope",
+            "Next": "WriteResult"
+          },
+          "WriteResult": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::aws-sdk:s3:putObject",
+            "Parameters": {
+              "Bucket.$": "$.result_s3_bucket",
+              "Key.$": "$.result_s3_key",
+              "Body.$": "States.JsonToString($.result_envelope)",
+              "ContentType": "application/json"
+            },
+            "ResultPath": null,
+            "Next": "BuildModelRef"
+          },
+          "BuildModelRef": {
+            "Type": "Pass",
+            "Parameters": {
+              "batch_id.$": "$.batch_id",
+              "result_s3_bucket.$": "$.result_s3_bucket",
+              "result_s3_key.$": "$.result_s3_key"
+            },
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.model_result_refs",
+      "Next": "MergeBedrockOutput"
+    },
+    "MergeBedrockOutput": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${merge_bedrock_output_lambda_arn}",
+        "Payload": {
+          "job_name.$": "$.job_name",
+          "bucket": "${data_bucket_name}",
+          "translation_engine": "bedrock",
+          "original_video_uri.$": "$.original_video_uri",
+          "segments_s3_uri.$": "$.segments_s3_uri",
+          "model_result_refs.$": "$.model_result_refs",
+          "bedrock_batch_count.$": "$.bedrock_batch_count",
+          "bedrock_batch_size.$": "$.bedrock_batch_size",
+          "output_prefix.$": "States.Format('translations/bedrock/{}', $.job_name)"
+        }
+      },
+      "OutputPath": "$.Payload",
+      "End": true
+    }
+  }
+}
